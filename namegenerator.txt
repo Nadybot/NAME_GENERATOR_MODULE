@@ -1,0 +1,10 @@
+To generate a random name of random length:
+<highlight><tab><symbol>suggestname<end>
+
+To generate a random name of a specific length, either "short", "medium" or "long":
+<highlight><tab><symbol>suggestname length<end>
+
+<header2>Example:<end>
+
+Generate a random long name:
+<highlight><tab><symbol>suggestname long<end>
