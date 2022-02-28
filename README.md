@@ -1,6 +1,7 @@
 # Name generator module
 
-This module can generate character names for games.
+This module can generate character names for Anarchy Online, which
+are guaranteed to be unused.
 
 ## Usage
 

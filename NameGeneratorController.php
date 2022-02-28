@@ -1,40 +1,36 @@
 <?php declare(strict_types=1);
 
-namespace Nadybot\User\Modules;
+namespace Nadybot\User\Modules\NAME_GENERATOR;
 
+use Illuminate\Support\Collection;
 use Nadybot\Core\{
-	CommandReply,
+	Attributes as NCA,
+	CmdContext,
+	ModuleInstance,
 	Http,
 	HttpResponse,
-	Nadybot,
 };
+use Nadybot\Core\Modules\PLAYER_LOOKUP\PlayerManager;
 
 /**
  * A command to generate new character names.
  *
  * @author Yakachi (RK5)
- *
- * @Instance
- *
- * Commands this controller contains:
- *	@DefineCommand(
- *		command     = 'suggestname',
- *		accessLevel = 'all',
- *		description = 'Generate a random character name',
- *		help        = 'namegenerator.txt'
- *	)
  */
-class NameGeneratorController {
-	/**
-	 * Name of the module.
-	 * Set automatically by module loader.
-	 */
-	public string $moduleName;
+#[
+	NCA\Instance,
+	NCA\DefineCommand(
+		command:     'suggestname',
+		accessLevel: 'all',
+		description: 'Generate a random character name',
+	)
+]
 
-	/** @Inject */
-	public Nadybot $chatBot;
+class NameGeneratorController extends ModuleInstance {
+	#[NCA\Inject()]
+	public PlayerManager $playerManager;
 
-	/** @Inject */
+	#[NCA\Inject()]
 	public Http $http;
 
 	/**
@@ -62,37 +58,52 @@ class NameGeneratorController {
 	}
 
 	/**
-	 * The !name command generates a character name for an optional length
-	 *
-	 * @HandlesCommand("suggestname")
-	 * @Matches("/^suggestname$/i")
-	 * @Matches("/^suggestname (short|medium|long)$/i")
+	 * Generate a character name with an optional length
 	 */
-	public function nameCommand(string $message, string $channel, string $sender, CommandReply $sendto, array $args): void {
-		$length = static::LENGTHS[array_rand(static::LENGTHS)];
-		if (isset($args[1])) {
-			$length = $args[1];
-		}
+	#[NCA\HandlesCommand("suggestname")]
+	public function nameCommand(
+		CmdContext $context,
+		#[NCA\StrChoice("short", "medium", "long")] ?string $length
+	): void {
+		$length ??= static::LENGTHS[array_rand(static::LENGTHS)];
 		$this->http
 				->get(sprintf(static::NAME_GENERATOR_URL, $length))
 				->withTimeout(5)
-				->withCallback([$this, "sendName"], $sendto);
+				->withCallback([$this, "sendName"], $context);
 	}
 
-	public function sendName(HttpResponse $response, CommandReply $sendto): void {
+	public function sendName(HttpResponse $response, CmdContext $context): void {
 		if ($response->error) {
-			$sendto->reply($response->error);
+			$context->reply($response->error);
 			return;
 		}
 		$names = $this->nameGeneratorHtmlToNames($response->body ?? "");
 		if (empty($names)) {
 			$msg = "No names were found. If this occurs too often, please contact the author of the module.";
-			$sendto->reply($msg);
+			$context->reply($msg);
 			return;
 		}
 
-		$name = $names[array_rand($names)];
-		$msg = "You should call your next character <highlight>{$name}<end>.";
-		$sendto->reply($msg);
+		$this->playerManager->massGetByNameAsync(
+			/** @param string[] $names */
+			function (array $names) use ($context): void {
+				$this->showNameSuggestions($names, $context);
+			},
+			$names
+		);
+	}
+
+	/** @param string[] $names */
+	protected function showNameSuggestions(array $names, CmdContext $context): void {
+		$names = (new Collection($names))
+			->filter(fn(?object $data): bool => $data === null)
+			->keys();
+		if ($names->isEmpty()) {
+			$context->reply("No unused names found, please try again.");
+			return;
+		}
+		$msg = "Name suggestions for your next character: <highlight>".
+			$names->join("<end>, <highlight>", "<end> or <highlight>") . "<end>.";
+		$context->reply($msg);
 	}
 }
