@@ -6,14 +6,14 @@ on:
 jobs:
   build:
     name: Create vendor bundle
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-22.04
     steps:
       - name: Checkout sources
-        uses: actions/checkout@v2
-      - name: Setup PHP 8.0 with
+        uses: actions/checkout@v4
+      - name: Setup PHP 8.1 with
         uses: shivammathur/setup-php@v2
         with:
-          php-version: '8.0'
+          php-version: '8.1'
       - name: Create directory zip
         shell: bash
         run: |

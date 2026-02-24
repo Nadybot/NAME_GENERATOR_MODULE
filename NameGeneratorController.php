@@ -1,21 +1,25 @@
 <?php declare(strict_types=1);
 
-namespace Nadybot\User\Modules\NAME_GENERATOR;
+namespace Nadybot\User\Modules\NAME_GENERATOR_MODULE;
 
-use function Amp\call;
-use Amp\Http\Client\{HttpClientBuilder, Request, Response};
-use Amp\Promise;
-use Generator;
+use function Amp\async;
+use function Amp\Future\awaitAll;
+use Amp\{CancelledException, TimeoutCancellation};
+use Amp\Http\Client\{HttpClientBuilder, Request};
+use Exception;
 use Illuminate\Support\Collection;
-use Nadybot\Core\DBSchema\Player;
-
-use Nadybot\Core\Modules\PLAYER_LOOKUP\PlayerManager;
 use Nadybot\Core\{
 	Attributes as NCA,
+	Attributes\Parameter\StrChoice,
 	CmdContext,
+	DBSchema\Player,
+	Exceptions\UserException,
 	ModuleInstance,
-	UserException,
+	Modules\PLAYER_LOOKUP\PlayerManager,
+	Safe,
+	Types\AccessLevel,
 };
+use Psr\Log\LoggerInterface;
 use Throwable;
 
 /**
@@ -27,7 +31,7 @@ use Throwable;
 	NCA\Instance,
 	NCA\DefineCommand(
 		command: 'suggestname',
-		accessLevel: 'all',
+		accessLevel: AccessLevel::Guest,
 		description: 'Generate a random character name',
 	)
 ]
@@ -46,11 +50,14 @@ class NameGeneratorController extends ModuleInstance {
 		'medium',
 		'long',
 	];
-	#[NCA\Inject()]
-	public PlayerManager $playerManager;
+	#[NCA\Inject]
+	private PlayerManager $playerManager;
 
-	#[NCA\Inject()]
-	public HttpClientBuilder $http;
+	#[NCA\Inject]
+	private HttpClientBuilder $http;
+
+	#[NCA\Logger]
+	private LoggerInterface $logger;
 
 	/**
 	 * Try to parse the array of generated names from the name generator HTML
@@ -58,64 +65,81 @@ class NameGeneratorController extends ModuleInstance {
 	 * @return string[]
 	 */
 	public function nameGeneratorHtmlToNames(string $html): array {
-		preg_match_all("/<li>([A-z]{4,12})<\/li>/", $html, $matches);
-		return $matches[1];
+		return Safe::pregMatchAll('|<li>([A-Za-z]{4,12})</li>|', $html)[1];
 	}
 
-	/** Generate a character name with an optional length */
-	#[NCA\HandlesCommand("suggestname")]
+	/**
+	 * Generate a character name with an optional length
+	 *
+	 * Character names suggested are guaranteed to be available in AO.
+	 */
+	#[NCA\HandlesCommand('suggestname')]
 	public function nameCommand(
 		CmdContext $context,
-		#[NCA\StrChoice("short", "medium", "long")] ?string $length
-	): Generator {
+		#[StrChoice('short', 'medium', 'long')] ?string $length
+	): void {
 		$length ??= static::LENGTHS[array_rand(static::LENGTHS)];
-		$freeNames = yield $this->getFreeNames(strtolower($length));
+		$freeNames = $this->getFreeNames(strtolower($length));
 		$msg = $this->renderNameSuggestions(...$freeNames);
 		$context->reply($msg);
 	}
 
-	/** @return Promise<string[]> */
-	private function getFreeNames(string $length): Promise {
-		return call(function () use ($length): Generator {
-			$client = $this->http->buildDefault();
+	/** @return list<string> */
+	private function getFreeNames(string $length): array {
+		$client = $this->http->buildDefault();
 
-			try {
-				/** @var Response */
-				$response = yield $client->request(new Request(sprintf(static::NAME_GENERATOR_URL, $length)));
-				$body = yield $response->getBody()->buffer();
-			} catch (Throwable $e) {
-				throw new UserException("Unexpected error calling the name API. Try again later, or come up with your own name.");
+		try {
+			$request = new Request(sprintf(static::NAME_GENERATOR_URL, $length));
+			$response = $client->request($request, new TimeoutCancellation(10));
+			if ($response->getStatus() !== 200) {
+				throw new Exception('ignore me');
 			}
-			$names = $this->nameGeneratorHtmlToNames($body);
-			if (empty($names)) {
-				throw new UserException("No names were found. If this occurs too often, please contact the author of the module.");
-			}
-			$lookups = [];
-			foreach ($names as $name) {
-				$lookups[$name] = $this->playerManager->byName($name);
-			}
+			$body = $response->getBody()->buffer();
+		} catch (CancelledException) {
+			throw new UserException('Timeout calling the name API. Try again later, or come up with your own name.');
+		} catch (Throwable) {
+			throw new UserException('Unexpected error calling the name API. Try again later, or come up with your own name.');
+		}
+		$names = $this->nameGeneratorHtmlToNames($body);
+		if (count($names) === 0) {
+			throw new UserException('No names were found. If this occurs too often, please contact the author of the module.');
+		}
+		$lookups = [];
+		foreach ($names as $name) {
+			$lookups[$name] = async($this->playerManager->byName(...), $name);
+		}
 
-			/** @var array<string,?Player> */
-			$results = yield $lookups;
+		[$errors, $results] = awaitAll($lookups);
 
-			/** @var string[] */
-			$freeNames = array_keys(
-				array_filter(
-					$results,
-					fn (?Player $data): bool => $data === null,
-				)
-			);
-			return $freeNames;
-		});
+		if (count($results) === 0) {
+			$exception = array_shift($errors);
+			if ($exception !== null) {
+				$this->logger->error('Error looking up names: {error}', [
+					'error' => $exception->getMessage(),
+					'exception' => $exception,
+				]);
+				throw $exception;
+			}
+			throw new UserException('No names were found. If this occurs too often, please contact the author of the module.');
+		}
+
+		/** @var string[] */
+		$freeNames = array_keys(
+			array_filter(
+				$results,
+				static fn (?Player $data): bool => $data === null,
+			)
+		);
+		return $freeNames;
 	}
 
 	private function renderNameSuggestions(string ...$names): string {
 		$names = new Collection($names);
 		if ($names->isEmpty()) {
-			return "No unused names found, please try again.";
+			return 'No unused names found, please try again.';
 		}
-		$msg = "Name suggestions for your next character: <highlight>".
-			$names->join("<end>, <highlight>", "<end> or <highlight>") . "<end>.";
+		$msg = 'Name suggestions for your next character: <highlight>'.
+			$names->join('<end>, <highlight>', '<end> or <highlight>') . '<end>.';
 		return $msg;
 	}
 }

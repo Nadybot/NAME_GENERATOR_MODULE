@@ -1,10 +1,10 @@
 name = "NAME_GENERATOR_MODULE"
 description = "Generates character names for games"
-version = "0.1.5"
+version = "1.0.0"
 author = "Yakachi"
 github = "Nadybot/NAME_GENERATOR_MODULE"
 bot_type = "Nadybot"
-bot_version = "^6.1.0"
+bot_version = "^7.0.0-alpha"
 
 [requires]
 ext-pcre = "*"
